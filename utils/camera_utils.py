@@ -17,12 +17,22 @@ import cv2
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset):
+def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_sddf_dataset, is_test_dataset):
     image = Image.open(cam_info.image_path)
 
     if cam_info.depth_path != "":
         try:
-            if is_nerf_synthetic:
+            if is_sddf_dataset:
+                # print("sddf dataset. inverting depth")
+                depth_image = cv2.imread(cam_info.depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+                depth_image = np.clip(depth_image, 1e-3, 1e6)
+                invdepthmap = np.reciprocal(depth_image)
+                if np.any(np.isinf(invdepthmap)):
+                    print("infty detected")
+                if np.any(np.isnan(invdepthmap)):
+                    print("nan detected")
+
+            elif is_nerf_synthetic:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 512
             else:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / float(2**16)
@@ -66,11 +76,11 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
                   train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
 
-def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
+def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_sddf_dataset, is_test_dataset):
     camera_list = []
 
     for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_test_dataset))
+        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_sddf_dataset, is_test_dataset))
 
     return camera_list
 

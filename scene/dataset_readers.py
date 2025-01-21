@@ -22,6 +22,8 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+import pickle
+import yaml
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -44,6 +46,7 @@ class SceneInfo(NamedTuple):
     nerf_normalization: dict
     ply_path: str
     is_nerf_synthetic: bool
+    is_sddf_dataset: bool
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -222,7 +225,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path,
-                           is_nerf_synthetic=False)
+                           is_nerf_synthetic=False,
+                           is_sddf_dataset=False)
     return scene_info
 
 def readCamerasFromTransforms(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):
@@ -234,7 +238,7 @@ def readCamerasFromTransforms(path, transformsfile, depths_folder, white_backgro
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
-            cam_name = os.path.join(path, frame["file_path"] + extension)
+            cam_name = os.path.join(path, frame["file_path"])
 
             # NeRF 'transform_matrix' is a camera-to-world transform
             c2w = np.array(frame["transform_matrix"])
@@ -306,10 +310,114 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path,
-                           is_nerf_synthetic=True)
+                           is_nerf_synthetic=True,
+                           is_sddf_dataset=False)
     return scene_info
+
+def readSDDFCamInfo(
+    path,
+    suffix='train',      
+):
+    base_path = os.path.join(path, suffix)
+    poses_pickle_file_path = os.path.join(base_path, 'poses.pkl')
+    with open(poses_pickle_file_path, 'rb') as f:
+        poses = pickle.load(f)
+    sensor_setting_file_path = os.path.join(base_path, 'sensor_setting.yaml')
+    with open(sensor_setting_file_path, 'r') as f:
+        sensor_setting = yaml.safe_load(f)
+
+    FovX = focal2fov(
+        sensor_setting["camera_fx"], 
+        sensor_setting["image_width"]
+    )
+    FovY = focal2fov(
+        sensor_setting["camera_fy"],
+        sensor_setting["image_height"]
+    )
+
+    cam_infos = []
+    rgb_image_path_base = os.path.join(base_path, 'rgb')
+    depth_image_path_base = os.path.join(base_path, 'depth')
+
+    oTc = np.array([
+        [0, -1, 0],
+        [0, 0, -1],
+        [1, 0, 0]
+    ])
+
+    for idx, (R_wTc, T_wTc) in enumerate(poses):
+        image_name = f"{idx:06}"
+        image_file_path = os.path.join(
+            rgb_image_path_base,
+            image_name + ".png"
+        )
+
+        depth_image_file_path = os.path.join(
+            depth_image_path_base,
+            image_name + ".tiff"
+        )
+
+        R_oTw = oTc @ R_wTc.T 
+        T_oTw = oTc @ (-R_wTc.T @ T_wTc) 
+
+        cam_infos.append(
+            CameraInfo(
+                uid=idx,
+                R = R_oTw.T,
+                T = T_oTw,
+                FovX=FovX,
+                FovY=FovY,
+                depth_params=None, # this means reliable depth
+                image_path=image_file_path,
+                image_name = image_name,
+                depth_path= depth_image_file_path,
+                width = sensor_setting["image_width"],
+                height = sensor_setting["image_height"],
+                is_test= suffix != "train"
+            )
+        )
+
+            # cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+            #                 image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1], mask=None))
+            
+    return cam_infos
+
+def readSDDFDatasetInfo(
+        path
+    ):
+
+    ply_path = os.path.join(path, "points3d.ply")
+    # TODO: combine depth image pointclouds? 
+    if ply_path is None or not os.path.exists(ply_path):
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+
+    pcd = fetchPly(ply_path)
+
+    cam_base_path = os.path.join(path, 'scans')
+
+    train_cam_infos = readSDDFCamInfo(cam_base_path, 'train')
+    test_cam_infos = readSDDFCamInfo(cam_base_path, 'test')
+
+    scene_info = SceneInfo(train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=getNerfppNorm(train_cam_infos),
+                           ply_path=ply_path,
+                           point_cloud=pcd,
+                           is_nerf_synthetic=False,
+                           is_sddf_dataset=True)
+    return scene_info
+
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "SDDF": readSDDFDatasetInfo,
 }
